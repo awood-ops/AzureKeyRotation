@@ -20,6 +20,7 @@ trigger: none
 #     include:
 #     - main  # Adjust branch if needed
 
+# Use a Windows agent for PowerShell execution
 jobs:
   - job: RotatePrimaryKeys
     displayName: 'Rotate Primary Service Bus Keys'
@@ -61,4 +62,5 @@ jobs:
             -SecretExpiryDays $(SecretExpiryDays)
             -Force
           azurePowerShellVersion: 'LatestVersion'
+          pwsh: true
           errorActionPreference: 'Stop'

@@ -70,4 +70,5 @@ jobs:
             -SecretExpiryDays $(SecretExpiryDays)
             -Force
           azurePowerShellVersion: 'LatestVersion'
+          pwsh: true
           errorActionPreference: 'Stop'

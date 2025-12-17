@@ -51,7 +51,7 @@ jobs:
         value: '<eventhub-instance-name>'
       - name: KeyVaultName
         value: '<keyvault-name>'
-        
+
     steps:
       - task: AzurePowerShell@5
         displayName: 'Rotate Secondary Event Hub Key'
@@ -70,4 +70,5 @@ jobs:
             -SecretExpiryDays $(SecretExpiryDays)
             -Force
           azurePowerShellVersion: 'LatestVersion'
+          pwsh: true
           errorActionPreference: 'Stop'
