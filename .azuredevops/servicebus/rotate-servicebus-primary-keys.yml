@@ -1,0 +1,64 @@
+# Azure DevOps YAML Pipeline: Rotate Primary Service Bus Keys
+# Rotates the primary key for Service Bus queues/topics and stores them in Key Vault.
+#
+# CROSS-SUBSCRIPTION SUPPORT:
+# To enable cross-subscription scenarios, add these optional variables:
+#   ServiceBusSubscriptionId: 'subscription-id-for-servicebus'  # Optional
+#   KeyVaultResourceGroup: 'rg-for-keyvault'                    # Optional, defaults to ResourceGroup
+#   KeyVaultSubscriptionId: 'subscription-id-for-keyvault'      # Optional
+
+name: Rotate-ServiceBus-Primary-Keys-$(Date:yyyyMMdd)
+
+# No CI/CD triggers - this is scheduled only
+trigger: none
+
+# Schedule: Run on the 1st of every month at midnight UTC (approximates every 30 days)
+# schedules:
+# - cron: "0 0 1 * *"
+#   displayName: "Monthly Primary Key Rotation (1st of Month)"
+#   branches:
+#     include:
+#     - main  # Adjust branch if needed
+
+jobs:
+  - job: RotatePrimaryKeys
+    displayName: 'Rotate Primary Service Bus Keys'
+    pool:
+      name: <your-agent-pool>
+    variables:
+      - name: KeyName
+        value: '<authorization-rule-name>'
+      - name: SecretNamePrefix
+        value: 'servicebus'
+      - name: SecretExpiryDays
+        value: 30
+      - name: ResourceGroup
+        value: '<resource-group>'
+      - name: ServiceBusNamespace
+        value: '<servicebus-namespace>'
+      - name: EntityName
+        value: '<queue-or-topic-name>'
+      - name: EntityType
+        value: 'Queue'  # or 'Topic'
+      - name: KeyVaultName
+        value: '<keyvault-name>'
+    steps:
+      - task: AzurePowerShell@5
+        displayName: 'Rotate Primary Service Bus Key'
+        inputs:
+          azureSubscription: '<ENTER YOUR AZURE DEVOPS SERVICE CONNECTION NAME HERE>'
+          ScriptType: 'FilePath'
+          ScriptPath: 'Scripts/servicebus/Rotate-ServiceBusAccessKeys.ps1'
+          ScriptArguments: >
+            -ResourceGroup "$(ResourceGroup)"
+            -ServiceBusNamespace "$(ServiceBusNamespace)"
+            -EntityName "$(EntityName)"
+            -EntityType "$(EntityType)"
+            -KeyName "$(KeyName)"
+            -Rotate "Primary"
+            -KeyVaultName "$(KeyVaultName)"
+            -SecretNamePrefix "$(SecretNamePrefix)"
+            -SecretExpiryDays $(SecretExpiryDays)
+            -Force
+          azurePowerShellVersion: 'LatestVersion'
+          errorActionPreference: 'Stop'

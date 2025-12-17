@@ -1,0 +1,73 @@
+# Azure DevOps YAML Pipeline: Rotate Secondary Event Hub Keys
+# Rotates the secondary key for DEV environment only (for testing purposes).
+#
+# CROSS-SUBSCRIPTION SUPPORT:
+# To enable cross-subscription scenarios, add these optional variables to any environment matrix:
+#   EventHubSubscriptionId: 'subscription-id-for-eventhub'  # Optional
+#   KeyVaultResourceGroup: 'rg-for-keyvault'               # Optional, defaults to ResourceGroup
+#   KeyVaultSubscriptionId: 'subscription-id-for-keyvault' # Optional
+#
+# Example:
+#   prod:
+#     environment: 'prod'
+#     EventHubSubscriptionId: '11111111-1111-1111-1111-111111111111'
+#     KeyVaultResourceGroup: 'rg-security-prod'
+#     KeyVaultSubscriptionId: '22222222-2222-2222-2222-222222222222'
+#     ... (other variables)
+
+name: Rotate-EventHub-Secondary-Keys-$(Date:yyyyMMdd)
+
+# No CI/CD triggers - this is scheduled only
+trigger: none
+
+# Schedule: Run on the 16th of every month at midnight UTC (approximates every 30 days, offset from primary)
+# schedules:
+# - cron: "0 0 16 * *"
+#   displayName: "Monthly Secondary Key Rotation (16th of Month) - All Environments"
+#   branches:
+#     include:
+#     - main  # Adjust branch if needed
+
+# Use a Windows agent for PowerShell execution
+jobs:
+  - job: RotateSecondaryKeys
+    displayName: 'Rotate Secondary Keys'
+    pool:
+      name: <your-agent-pool>
+    variables:
+      - name: KeyName
+        value: '<authorization-rule-name>'
+      - name: KeyName2
+        value: '<authorization-rule-name-2>'
+      - name: SecretNamePrefix
+        value: 'eventhub'
+      - name: SecretExpiryDays
+        value: 30
+      - name: ResourceGroup
+        value: '<resource-group>'
+      - name: Namespace
+        value: '<eventhub-namespace>'
+      - name: EventHubName
+        value: '<eventhub-instance-name>'
+      - name: KeyVaultName
+        value: '<keyvault-name>'
+        
+    steps:
+      - task: AzurePowerShell@5
+        displayName: 'Rotate Secondary Event Hub Key'
+        inputs:
+          azureSubscription: '<ENTER YOUR AZURE DEVOPS SERVICE CONNECTION NAME HERE>'
+          ScriptType: 'FilePath'
+          ScriptPath: 'Scripts/eventhub/Rotate-EventHubAccessKeys.ps1'
+          ScriptArguments: >
+            -ResourceGroup "$(ResourceGroup)"
+            -Namespace "$(Namespace)"
+            -KeyName "$(KeyName)"
+            -EventHubName "$(EventHubName)"
+            -Rotate "Secondary"
+            -KeyVaultName "$(KeyVaultName)"
+            -SecretNamePrefix "$(SecretNamePrefix)"
+            -SecretExpiryDays $(SecretExpiryDays)
+            -Force
+          azurePowerShellVersion: 'LatestVersion'
+          errorActionPreference: 'Stop'
