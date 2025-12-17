@@ -48,6 +48,18 @@
         @{RoleDefinitionName="Key Vault Secrets Officer"; Scope="/subscriptions/{id}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults/{name}"}
     )
 
+.PARAMETER GrantApplicationOwnership
+    Array of Application IDs to grant the service principal ownership of.
+    This enables least-privilege secret rotation where the workload identity only manages specific applications.
+    When specified, automatically grants Application.ReadWrite.OwnedBy Microsoft Graph API permission with admin consent.
+    Format: @("app-id-1", "app-id-2", ...)
+    Example: @("12345678-1234-1234-1234-123456789012")
+
+.PARAMETER GrantDirectoryReadersRole
+    If specified, assigns the Directory Readers role to the service principal.
+    This allows the service principal to read directory objects (users, groups, service principals).
+    Useful for automation that needs to read Entra ID information.
+
 .PARAMETER AzureDevOpsOrganization
     Azure DevOps organization name (e.g., "myorg" from dev.azure.com/myorg)
 
@@ -109,6 +121,19 @@
         -AzureDevOpsProject "MyProject"
 
 .EXAMPLE
+    # Create service principal for secret rotation with application ownership (least privilege)
+    .\New-WorkloadIdentity.ps1 `
+        -ServicePrincipalName "sp-secretrotation" `
+        -SubscriptionId "11111111-1111-1111-1111-111111111111" `
+        -RoleAssignments @(
+            @{RoleDefinitionName="Key Vault Secrets Officer"; Scope="/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/my-rg/providers/Microsoft.KeyVault/vaults/my-vault"}
+        ) `
+        -GrantApplicationOwnership @("12345678-1234-1234-1234-123456789012", "87654321-4321-4321-4321-210987654321") `
+        -GrantDirectoryReadersRole `
+        -AzureDevOpsOrganization "myorg" `
+        -AzureDevOpsProject "SecretRotation"
+
+.EXAMPLE
     # Create service principal with Graph API permissions
     .\New-WorkloadIdentity.ps1 `
         -ServicePrincipalName "sp-graph-app" `
@@ -168,6 +193,12 @@ param(
     [switch]$SkipServiceConnection,
 
     [Parameter(Mandatory = $false)]
+    [array]$GrantApplicationOwnership,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$GrantDirectoryReadersRole,
+
+    [Parameter(Mandatory = $false)]
     [array]$AdditionalApiPermissions,
 
     [Parameter(Mandatory = $false)]
@@ -189,7 +220,7 @@ if (-not $SkipServiceConnection -and (-not $AzureDevOpsOrganization -or -not $Az
 }
 
 # Check Azure context
-Write-Host "[1/7] Checking Azure connection..." -ForegroundColor Yellow
+Write-Host "[1/9] Checking Azure connection..." -ForegroundColor Yellow
 try {
     $context = Get-AzContext
     if (-not $context) {
@@ -205,7 +236,7 @@ catch {
 }
 
 # Set subscription context
-Write-Host "`n[2/7] Setting subscription context..." -ForegroundColor Yellow
+Write-Host "`n[2/9] Setting subscription context..." -ForegroundColor Yellow
 try {
     $subscription = Get-AzSubscription -SubscriptionId $SubscriptionId -ErrorAction Stop
     Set-AzContext -SubscriptionId $SubscriptionId | Out-Null
@@ -248,6 +279,21 @@ if (-not $Force) {
         Write-Host "   - Assign role: $RoleDefinitionName" -ForegroundColor Gray
         Write-Host "   - Scope: $Scope" -ForegroundColor Gray
     }
+    if ($GrantApplicationOwnership -and $GrantApplicationOwnership.Count -gt 0) {
+        Write-Host "   - Grant ownership of applications:" -ForegroundColor Gray
+        foreach ($appId in $GrantApplicationOwnership) {
+            try {
+                $app = Get-AzADApplication -ApplicationId $appId -ErrorAction Stop
+                Write-Host "     * $($app.DisplayName) ($appId)" -ForegroundColor Gray
+            }
+            catch {
+                Write-Host "     * $appId (unable to retrieve name)" -ForegroundColor Gray
+            }
+        }
+    }
+    if ($GrantDirectoryReadersRole) {
+        Write-Host "   - Assign Directory Readers role" -ForegroundColor Gray
+    }
     if (-not $SkipServiceConnection) {
         Write-Host "   - Create Azure DevOps service connection in: $AzureDevOpsOrganization/$AzureDevOpsProject" -ForegroundColor Gray
     }
@@ -259,7 +305,7 @@ if (-not $Force) {
 }
 
 # Create or get service principal
-Write-Host "`n[3/7] Creating service principal..." -ForegroundColor Yellow
+Write-Host "`n[3/9] Creating service principal..." -ForegroundColor Yellow
 try {
     $sp = Get-AzADServicePrincipal -DisplayName $ServicePrincipalName -ErrorAction SilentlyContinue
     if ($sp) {
@@ -285,7 +331,7 @@ catch {
 }
 
 # Assign Azure RBAC role(s)
-Write-Host "`n[4/7] Assigning Azure RBAC role(s)..." -ForegroundColor Yellow
+Write-Host "`n[4/9] Assigning Azure RBAC role(s)..." -ForegroundColor Yellow
 try {
     if ($RoleAssignments) {
         # Multiple role assignments
@@ -331,9 +377,273 @@ catch {
     exit 1
 }
 
+# Grant application ownership if specified
+if ($GrantApplicationOwnership -and $GrantApplicationOwnership.Count -gt 0) {
+    Write-Host "`n[5/9] Granting application ownership..." -ForegroundColor Yellow
+    $ownershipCount = 0
+    $failedCount = 0
+    
+    # Get Graph API token
+    $tokenResult = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com"
+    
+    # Extract token - handle SecureString if needed
+    if ($tokenResult.Token -is [SecureString]) {
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResult.Token)
+        $graphToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+    elseif ($tokenResult.Token) {
+        $graphToken = $tokenResult.Token
+    }
+    else {
+        Write-Warning "Could not retrieve Graph API token"
+        $graphToken = $null
+    }
+    
+    if (-not $graphToken) {
+        Write-Warning "Skipping application ownership (could not get Graph API token)"
+    }
+    else {
+        $graphHeaders = @{
+            "Authorization" = "Bearer $graphToken"
+            "Content-Type" = "application/json"
+        }
+    
+    foreach ($appId in $GrantApplicationOwnership) {
+        try {
+            # Get the application
+            $targetApp = Get-AzADApplication -ApplicationId $appId -ErrorAction Stop
+            
+            # Add owner using Graph API
+            $ownerBody = @{
+                "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$($sp.Id)"
+            } | ConvertTo-Json
+            
+            $ownerUri = "https://graph.microsoft.com/v1.0/applications/$($targetApp.Id)/owners/`$ref"
+            
+            try {
+                Invoke-RestMethod -Method Post -Uri $ownerUri -Headers $graphHeaders -Body $ownerBody -ErrorAction Stop
+                Write-Host "  ✓ Granted ownership of application: $($targetApp.DisplayName) ($appId)" -ForegroundColor Green
+                $ownershipCount++
+            }
+            catch {
+                # Check if error is because already an owner
+                $errorMessage = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($_.Exception.Response.StatusCode -eq 409 -or 
+                    $_.Exception.Response.StatusCode.value__ -eq 400 -or
+                    $errorMessage.error.code -eq "Request_BadRequest" -or
+                    $_.Exception.Message -like "*already exist*") {
+                    Write-Host "  ✓ Already owner of application: $($targetApp.DisplayName) ($appId)" -ForegroundColor Gray
+                }
+                else {
+                    throw
+                }
+            }
+        }
+        catch {
+            Write-Warning "Failed to grant ownership of application $appId : $_"
+            $failedCount++
+        }
+    }
+    
+    if ($ownershipCount -gt 0) {
+        Write-Host "✓ Granted ownership of $ownershipCount application(s)" -ForegroundColor Green
+    }
+    if ($failedCount -gt 0) {
+        Write-Warning "Failed to grant ownership of $failedCount application(s)"
+    }
+    if ($ownershipCount -eq 0 -and $failedCount -eq 0) {
+        Write-Host "✓ All application ownerships already exist" -ForegroundColor Green
+    }
+    
+    # Grant Application.ReadWrite.OwnedBy API permission
+    Write-Host "`n  Granting Application.ReadWrite.OwnedBy permission..." -ForegroundColor Gray
+    try {
+        $app = Get-AzADApplication -DisplayName $ServicePrincipalName -ErrorAction Stop
+        
+        # Microsoft Graph API ID
+        $graphApiId = "00000003-0000-0000-c000-000000000000"
+        
+        # Application.ReadWrite.OwnedBy permission ID
+        $appReadWriteOwnedById = "18a4783c-866b-4cc7-a460-3d5e5662c884"
+        
+        # Check if permission already exists
+        $existingPermissions = Get-AzADAppPermission -ApplicationId $app.AppId -ErrorAction SilentlyContinue
+        $permissionExists = $existingPermissions | Where-Object { 
+            $_.ApiId -eq $graphApiId -and 
+            $_.Id -eq $appReadWriteOwnedById -and 
+            $_.Type -eq "Role"
+        }
+        
+        if ($permissionExists) {
+            Write-Host "  ✓ Application.ReadWrite.OwnedBy permission already exists" -ForegroundColor Gray
+        }
+        else {
+            Add-AzADAppPermission -ApplicationId $app.AppId `
+                -ApiId $graphApiId `
+                -PermissionId $appReadWriteOwnedById `
+                -Type "Role" -ErrorAction Stop
+            Write-Host "  ✓ Added Application.ReadWrite.OwnedBy permission" -ForegroundColor Green
+        }
+        
+        # Grant admin consent for application permission (appRoleAssignment)
+        Write-Host "  Granting admin consent..." -ForegroundColor Gray
+        Start-Sleep -Seconds 3
+        
+        # Get Microsoft Graph service principal
+        $graphSp = Get-AzADServicePrincipal -ApplicationId $graphApiId -ErrorAction Stop
+        
+        # Check if consent already granted (appRoleAssignment exists)
+        $consentCheckUri = "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.Id)/appRoleAssignments"
+        $existingConsents = Invoke-RestMethod -Method Get -Uri $consentCheckUri -Headers $graphHeaders -ErrorAction SilentlyContinue
+        
+        $consentExists = $existingConsents.value | Where-Object {
+            $_.resourceId -eq $graphSp.Id -and $_.appRoleId -eq $appReadWriteOwnedById
+        }
+        
+        if ($consentExists) {
+            Write-Host "  ✓ Admin consent already granted" -ForegroundColor Gray
+        }
+        else {
+            # Grant consent using appRoleAssignments endpoint
+            $consentBody = @{
+                principalId = $sp.Id
+                resourceId = $graphSp.Id
+                appRoleId = $appReadWriteOwnedById
+            } | ConvertTo-Json
+            
+            $consentUri = "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.Id)/appRoleAssignments"
+            
+            try {
+                Invoke-RestMethod -Method Post -Uri $consentUri -Headers $graphHeaders -Body $consentBody -ErrorAction Stop | Out-Null
+                Write-Host "  ✓ Admin consent granted successfully" -ForegroundColor Green
+            }
+            catch {
+                Write-Warning "  Failed to grant admin consent via Graph API: $_"
+                Write-Host "  Trying with az cli..." -ForegroundColor Gray
+                az ad app permission admin-consent --id $app.AppId 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  ✓ Admin consent granted via az cli" -ForegroundColor Green
+                }
+                else {
+                    Write-Warning "  Failed to grant admin consent automatically"
+                    Write-Host "  ⚠️  Please grant admin consent manually in Azure Portal" -ForegroundColor Yellow
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Failed to add Application.ReadWrite.OwnedBy permission: $_"
+        Write-Host "  You may need to add this permission and grant consent manually in Azure Portal" -ForegroundColor Yellow
+    }
+    }
+}
+else {
+    Write-Host "`n[5/9] Skipping application ownership (none specified)..." -ForegroundColor Gray
+}
+
+# Assign Directory Readers role if requested
+if ($GrantDirectoryReadersRole) {
+    Write-Host "`n[5.5/9] Assigning Directory Readers role..." -ForegroundColor Yellow
+    
+    # Get Graph API token (reuse if already obtained)
+    if (-not $graphToken) {
+        $tokenResult = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com"
+        
+        # Extract token - handle SecureString if needed
+        if ($tokenResult.Token -is [SecureString]) {
+            $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResult.Token)
+            $graphToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+        elseif ($tokenResult.Token) {
+            $graphToken = $tokenResult.Token
+        }
+        else {
+            Write-Warning "Could not retrieve Graph API token"
+            $graphToken = $null
+        }
+    }
+    
+    if (-not $graphToken) {
+        Write-Warning "Skipping Directory Readers role assignment (could not get Graph API token)"
+    }
+    else {
+        try {
+            $graphHeaders = @{
+                "Authorization" = "Bearer $graphToken"
+                "Content-Type" = "application/json"
+            }
+            
+            # Get Directory Readers role template ID
+            $roleTemplateId = "88d8e3e3-8f55-4a1e-953a-9b9898b8876b"  # Directory Readers
+            
+            # Check if role is activated (instantiated) in the directory
+            $rolesUri = "https://graph.microsoft.com/v1.0/directoryRoles?`$filter=roleTemplateId eq '$roleTemplateId'"
+            $rolesResponse = Invoke-RestMethod -Method Get -Uri $rolesUri -Headers $graphHeaders
+            
+            if ($rolesResponse.value.Count -eq 0) {
+                # Role template needs to be activated first
+                Write-Host "  Activating Directory Readers role template..." -ForegroundColor Gray
+                $activateUri = "https://graph.microsoft.com/v1.0/directoryRoles"
+                $activateBody = @{
+                    roleTemplateId = $roleTemplateId
+                } | ConvertTo-Json
+                
+                $roleInstance = Invoke-RestMethod -Method Post -Uri $activateUri -Headers $graphHeaders -Body $activateBody
+                $roleId = $roleInstance.id
+            }
+            else {
+                $roleId = $rolesResponse.value[0].id
+            }
+            
+            # Check if already assigned
+            $membersUri = "https://graph.microsoft.com/v1.0/directoryRoles/$roleId/members"
+            $membersResponse = Invoke-RestMethod -Method Get -Uri $membersUri -Headers $graphHeaders
+            
+            $isAlreadyMember = $membersResponse.value | Where-Object { $_.id -eq $sp.Id }
+            
+            if ($isAlreadyMember) {
+                Write-Host "  ✓ Directory Readers role already assigned" -ForegroundColor Gray
+            }
+            else {
+                # Assign the role
+                $assignUri = "https://graph.microsoft.com/v1.0/directoryRoles/$roleId/members/`$ref"
+                $assignBody = @{
+                    "@odata.id" = "https://graph.microsoft.com/v1.0/directoryObjects/$($sp.Id)"
+                } | ConvertTo-Json
+                
+                try {
+                    Invoke-RestMethod -Method Post -Uri $assignUri -Headers $graphHeaders -Body $assignBody -ErrorAction Stop
+                    Write-Host "  ✓ Directory Readers role assigned successfully" -ForegroundColor Green
+                }
+                catch {
+                    # Check if error is because already a member
+                    $errorMessage = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    if ($_.Exception.Response.StatusCode.value__ -eq 400 -and
+                        ($errorMessage.error.code -eq "Request_BadRequest" -and 
+                         $errorMessage.error.message -like "*already exist*")) {
+                        Write-Host "  ✓ Directory Readers role already assigned" -ForegroundColor Gray
+                    }
+                    else {
+                        throw
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Warning "Failed to assign Directory Readers role: $_"
+            Write-Host "  You may need to assign this role manually in Entra ID" -ForegroundColor Yellow
+        }
+    }
+}
+else {
+    Write-Host "`n[5.5/9] Skipping Directory Readers role assignment..." -ForegroundColor Gray
+}
+
 # Add additional API permissions if specified
 if ($AdditionalApiPermissions -and $AdditionalApiPermissions.Count -gt 0) {
-    Write-Host "`n[5/7] Adding API permissions..." -ForegroundColor Yellow
+    Write-Host "`n[6/9] Adding API permissions..." -ForegroundColor Yellow
     try {
         $app = Get-AzADApplication -DisplayName $ServicePrincipalName
         $existingPermissions = Get-AzADAppPermission -ApplicationId $app.AppId -ErrorAction SilentlyContinue
@@ -371,12 +681,12 @@ if ($AdditionalApiPermissions -and $AdditionalApiPermissions.Count -gt 0) {
     }
 }
 else {
-    Write-Host "`n[5/7] Skipping API permissions (none specified)..." -ForegroundColor Gray
+    Write-Host "`n[6/9] Skipping API permissions (none specified)..." -ForegroundColor Gray
 }
 
 # Create Azure DevOps service connection
 if (-not $SkipServiceConnection) {
-    Write-Host "`n[6/7] Creating Azure DevOps service connection..." -ForegroundColor Yellow
+    Write-Host "`n[7/9] Creating Azure DevOps service connection..." -ForegroundColor Yellow
     
     # Set service connection name
     if (-not $ServiceConnectionName) {
@@ -608,8 +918,9 @@ if (-not $SkipServiceConnection) {
     }
 }
 else {
-    Write-Host "`n[6/7] Skipping Azure DevOps service connection..." -ForegroundColor Gray
-    Write-Host "`n[7/7] Skipping federated credential..." -ForegroundColor Gray
+    Write-Host "`n[7/9] Skipping Azure DevOps service connection..." -ForegroundColor Gray
+    Write-Host "`n[8/9] Skipping federated credential..." -ForegroundColor Gray
+    Write-Host "`n[9/9] Summary..." -ForegroundColor Gray
 }
 
 # Summary
@@ -632,6 +943,20 @@ else {
     Write-Host "Role Assignment:" -ForegroundColor Cyan
     Write-Host "  Role: $RoleDefinitionName" -ForegroundColor White
     Write-Host "  Scope: $Scope" -ForegroundColor White
+    Write-Host ""
+}
+
+if ($GrantApplicationOwnership -and $GrantApplicationOwnership.Count -gt 0) {
+    Write-Host "Application Ownership:" -ForegroundColor Cyan
+    foreach ($appId in $GrantApplicationOwnership) {
+        $targetApp = Get-AzADApplication -ApplicationId $appId -ErrorAction SilentlyContinue
+        if ($targetApp) {
+            Write-Host "  • $($targetApp.DisplayName) ($appId)" -ForegroundColor White
+        }
+        else {
+            Write-Host "  • $appId (not found)" -ForegroundColor Yellow
+        }
+    }
     Write-Host ""
 }
 

@@ -110,20 +110,52 @@ Enterprise-grade Service Principal client secret rotation script that creates ne
 
 ## 🔐 Required Permissions
 
-### Microsoft Entra ID (Azure AD)
-- **Application Administrator** (recommended)
-  - OR **Application.ReadWrite.All** (API permission)
-  - OR **Specific application owner** (least privilege approach)
+### Microsoft Entra ID (Entra ID)
+
+#### Least-Privilege Model (Recommended for Automation):
+- **Application Ownership** of the target Service Principal
+- **Directory Readers** role (to read directory objects)
+- **Application.ReadWrite.OwnedBy** Graph API permission (with admin consent)
+
+This model allows the workload identity to manage only applications it owns, without needing tenant-wide Application Administrator permissions.
+
+#### Alternative (Interactive Use):
+- **Application Administrator** (tenant-wide permissions)
+  - OR **Application.ReadWrite.All** API permission
 
 ### Key Vault
 - **Key Vault Secrets Officer** (recommended)
   - OR `Microsoft.KeyVault/vaults/secrets/read` + `Microsoft.KeyVault/vaults/secrets/write`
 
 ### Recommended: Application Ownership Model
-For automation with least privilege:
-1. Grant workload identity **ownership** of specific Service Principal applications
-2. No tenant-wide Application Administrator role required
-3. Workload identity can only rotate secrets for applications it owns
+
+Use the `New-WorkloadIdentity.ps1` script to automate setup:
+
+```powershell
+..\New-WorkloadIdentity.ps1 `
+    -ServicePrincipalName "sp-secretrotation" `
+    -SubscriptionId "your-subscription-id" `
+    -RoleAssignments @(
+        @{RoleDefinitionName="Key Vault Secrets Officer"; Scope="/subscriptions/.../vaults/your-keyvault"}
+    ) `
+    -GrantApplicationOwnership @("app-id-1", "app-id-2") `
+    -GrantDirectoryReadersRole `
+    -AzureDevOpsOrganization "yourorg" `
+    -AzureDevOpsProject "YourProject"
+```
+
+This automatically:
+1. Creates the workload identity with federated credentials
+2. Grants ownership of specified applications
+3. Assigns Directory Readers role
+4. Grants Application.ReadWrite.OwnedBy Graph API permission with admin consent
+5. Creates Azure DevOps service connection
+
+**Benefits:**
+- No tenant-wide Application Administrator permissions
+- Workload identity can only manage applications it owns
+- Automated Azure DevOps integration
+- Fully auditable and traceable
 
 ## 📦 Prerequisites
 
@@ -187,6 +219,11 @@ The script filters out certificates and only operates on client secrets using `C
 - Script only removes Entra ID client secrets, not Key Vault secret versions
 - Key Vault versions accumulate (this is intentional for audit/recovery)
 - Use `-RemoveOldSecrets` flag to clean up client secrets
+
+**Throttling Errors:**
+- Script includes automatic retry logic (3 attempts, 5-second delays)
+- Graph API may throttle concurrent requests - this is handled automatically
+- Transient errors like "concurrent requests" are retried automatically
 
 ## 🛡️ Security Best Practices
 

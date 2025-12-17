@@ -471,14 +471,38 @@ if ($RemoveOldSecrets -and $existingSecrets.Count -gt 0) {
             continue
         }
         
-        try {
-            Remove-AzADAppCredential -ObjectId $app.Id -KeyId $oldSecret.KeyId -ErrorAction Stop
-            Write-Host "  ✓ Removed secret KeyId: $($oldSecret.KeyId.ToString().Substring(0,8))..." -ForegroundColor Green
-            $removedCount++
-        }
-        catch {
-            Write-Warning "Failed to remove secret $($oldSecret.KeyId): $_"
-            $failedCount++
+        $retryCount = 0
+        $maxRetries = 3
+        $retryDelay = 5
+        $removed = $false
+        
+        while (-not $removed -and $retryCount -lt $maxRetries) {
+            try {
+                if ($retryCount -gt 0) {
+                    Write-Host "  Retry attempt $retryCount of $maxRetries..." -ForegroundColor Gray
+                }
+                
+                Remove-AzADAppCredential -ObjectId $app.Id -KeyId $oldSecret.KeyId -ErrorAction Stop
+                Write-Host "  ✓ Removed secret KeyId: $($oldSecret.KeyId.ToString().Substring(0,8))..." -ForegroundColor Green
+                $removedCount++
+                $removed = $true
+            }
+            catch {
+                $retryCount++
+                if ($_.Exception.Message -like "*concurrent requests*" -and $retryCount -lt $maxRetries) {
+                    Write-Host "  ⏳ Throttled by Graph API, waiting $retryDelay seconds..." -ForegroundColor Yellow
+                    Start-Sleep -Seconds $retryDelay
+                }
+                elseif ($retryCount -ge $maxRetries) {
+                    Write-Warning "Failed to remove secret $($oldSecret.KeyId) after $maxRetries attempts: $_"
+                    $failedCount++
+                }
+                else {
+                    Write-Warning "Failed to remove secret $($oldSecret.KeyId): $_"
+                    $failedCount++
+                    break
+                }
+            }
         }
     }
     

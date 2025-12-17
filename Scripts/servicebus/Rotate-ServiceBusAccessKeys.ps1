@@ -475,8 +475,8 @@ Write-Host "`n[8/8] Cleanup..." -ForegroundColor Yellow
 try {
     # Restore Key Vault context if needed
     if ($originalContext) {
-        Write-Host "  Switching back to previous context: $($serviceBusOriginalContext ? $serviceBusOriginalContext.Subscription.Id : $originalContext.Subscription.Id)" -ForegroundColor Gray
         $targetContext = if ($serviceBusOriginalContext) { $serviceBusOriginalContext } else { $originalContext }
+        Write-Host "  Switching back to previous context: $($targetContext.Subscription.Id)" -ForegroundColor Gray
         Set-AzContext -SubscriptionId $targetContext.Subscription.Id -ErrorAction Stop | Out-Null
         Write-Host "  ✓ Restored previous context" -ForegroundColor Green
     }

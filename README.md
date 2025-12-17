@@ -16,6 +16,7 @@ All rotated credentials are automatically stored in Azure Key Vault with configu
 ```
 AzureKeyRotation/
 ├── Scripts/
+│   ├── New-WorkloadIdentity.ps1                 # Creates service principals with RBAC and Azure DevOps integration
 │   ├── eventhub/
 │   │   ├── README.md
 │   │   └── Rotate-EventHubAccessKeys.ps1
@@ -25,16 +26,53 @@ AzureKeyRotation/
 │   └── serviceprincipal/
 │       ├── README.md
 │       └── Rotate-ServicePrincipalSecret.ps1
-└── .azuredevops/
-    ├── eventhub/
-    │   ├── rotate-eventhub-primary-keys.yml
-    │   └── rotate-eventhub-secondary-keys.yml
-    └── servicebus/
-        ├── rotate-servicebus-primary-keys.yml
-        └── rotate-servicebus-secondary-keys.yml
+├── .azuredevops/
+│   ├── eventhub/
+│   │   ├── rotate-eventhub-primary-keys.yml
+│   │   └── rotate-eventhub-secondary-keys.yml
+│   ├── servicebus/
+│   │   ├── rotate-servicebus-primary-keys.yml
+│   │   └── rotate-servicebus-secondary-keys.yml
+│   └── serviceprincipal/
+│       └── rotate-serviceprincipal-secrets.yml
+└── tests/
+    ├── infrastructure/
+    │   ├── Deploy-TestInfrastructure.ps1
+    │   ├── Remove-TestInfrastructure.ps1
+    │   └── test-config.json
+    └── README.md
 ```
 
 ## Scripts
+
+### Workload Identity Creation
+**Script:** `Scripts/New-WorkloadIdentity.ps1`
+
+Automated creation of workload identities (service principals) with Azure RBAC role assignments and Azure DevOps service connection integration.
+
+**Key Features:**
+- Creates service principals with federated credentials (no secrets)
+- Assigns multiple Azure RBAC roles at various scopes
+- Grants application ownership for least-privilege secret rotation
+- Automatically grants Application.ReadWrite.OwnedBy Graph API permission
+- Assigns Directory Readers role when needed
+- Creates Azure DevOps service connections with workload identity federation
+- Idempotent - safe to run multiple times
+- Comprehensive error handling and validation
+
+**Example:**
+```powershell
+.\Scripts\New-WorkloadIdentity.ps1 `
+    -ServicePrincipalName "sp-secretrotation" `
+    -SubscriptionId "12345678-1234-1234-1234-123456789012" `
+    -RoleAssignments @(
+        @{RoleDefinitionName="Key Vault Secrets Officer"; Scope="/subscriptions/.../providers/Microsoft.KeyVault/vaults/kv-prod"}
+    ) `
+    -GrantApplicationOwnership @("app-id-to-manage") `
+    -GrantDirectoryReadersRole `
+    -AzureDevOpsOrganization "myorg" `
+    -AzureDevOpsProject "MyProject"
+```
 
 ### Event Hub Key Rotation
 **Script:** `Scripts/eventhub/Rotate-EventHubAccessKeys.ps1`
@@ -69,14 +107,16 @@ Rotates Service Bus namespace or queue/topic-level access keys and stores them i
 ### Service Principal Secret Rotation
 **Script:** `Scripts/serviceprincipal/Rotate-ServicePrincipalSecret.ps1`
 
-Rotates Service Principal (Azure AD App Registration) client secrets and stores them in Azure Key Vault.
+Rotates Service Principal (Entra ID App Registration) client secrets and stores them in Azure Key Vault.
 
 **Key Features:**
 - Automatic secret expiration alignment with Key Vault
-- Optional removal of old secrets
+- Optional removal of old secrets with retry logic for throttling
 - Display name or Application ID lookup
 - Comprehensive metadata tagging
 - Cross-subscription support
+- Least-privilege support via application ownership
+- Requires: Directory Readers + Application.ReadWrite.OwnedBy permission
 - Force rotation capability
 
 [View detailed documentation](Scripts/serviceprincipal/README.md)
@@ -91,7 +131,10 @@ Rotates Service Principal (Azure AD App Registration) client secrets and stores 
 - **Primary Keys:** `.azuredevops/servicebus/rotate-servicebus-primary-keys.yml` (Scheduled: 1st of each month)
 - **Secondary Keys:** `.azuredevops/servicebus/rotate-servicebus-secondary-keys.yml` (Scheduled: 16th of each month)
 
-All pipelines support multi-environment deployment (dev, qa, sit, uat, prod) and include comprehensive logging.
+### Service Principal Rotation Pipeline
+- **Secrets:** `.azuredevops/serviceprincipal/rotate-serviceprincipal-secrets.yml` (Scheduled: 8th of each month)
+
+All pipelines use workload identity federation (no secrets) and include comprehensive logging.
 
 ## Prerequisites
 
@@ -99,14 +142,24 @@ All pipelines support multi-environment deployment (dev, qa, sit, uat, prod) and
 - `Az.Accounts` (all scripts)
 - `Az.EventHub` (Event Hub rotation)
 - `Az.ServiceBus` (Service Bus rotation)
-- `Az.Resources` (Service Principal rotation)
+- `Az.Resources` (Service Principal rotation, workload identity creation)
 - `Az.KeyVault` (all scripts)
 
 ### Azure Permissions
-- **Event Hub:** Contributor or Event Hub Data Owner on namespace/instance
-- **Service Bus:** Contributor or Service Bus Data Owner on namespace/queue/topic
-- **Service Principal:** Application Administrator or higher in Azure AD
-- **Key Vault:** Key Vault Secrets Officer or Contributor
+
+#### For Workload Identity Creation (New-WorkloadIdentity.ps1):
+- **Azure RBAC:** User Access Administrator or Owner (to assign roles)
+- **Entra ID:** Global Administrator or Privileged Role Administrator (to grant admin consent)
+- **Azure DevOps:** Project Collection Administrator or Build Administrator
+
+#### For Key Rotation:
+- **Event Hub:** Azure Event Hubs Data Owner on namespace/instance
+- **Service Bus:** Azure Service Bus Data Owner on namespace/queue/topic
+- **Service Principal (Least-Privilege):**
+  - Application ownership of target application(s)
+  - Directory Readers role (Entra ID)
+  - Application.ReadWrite.OwnedBy Graph API permission (with admin consent)
+- **Key Vault:** Key Vault Secrets Officer
 
 ## Quick Start
 
