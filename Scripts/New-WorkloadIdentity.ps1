@@ -22,6 +22,7 @@
 
 .PARAMETER RoleDefinitionName
     Azure RBAC role to assign. Default: "Contributor"
+    Note: Ignored if RoleAssignments is specified.
 
 .PARAMETER Scope
     Scope for role assignment. Default: subscription level ("/subscriptions/{id}")
@@ -30,10 +31,22 @@
     - "/subscriptions/{id}/resourceGroups/{rg}" (resource group)
     - "/subscriptions/{id}/resourceGroups/{rg}/providers/Microsoft.Storage/storageAccounts/{name}" (resource)
     Note: If ManagementGroupId is specified, Scope is ignored.
+    Note: Ignored if RoleAssignments is specified.
 
 .PARAMETER ManagementGroupId
     Management Group ID for role assignment. When specified, role is assigned at management group scope.
     Example: "mg-corporate" or "00000000-0000-0000-0000-000000000000"
+    Note: Ignored if RoleAssignments is specified.
+
+.PARAMETER RoleAssignments
+    Array of role assignments to create. Each element should have RoleDefinitionName and Scope properties.
+    When specified, RoleDefinitionName, Scope, and ManagementGroupId parameters are ignored.
+    Format: @(@{RoleDefinitionName="Role"; Scope="/scope/path"}, ...)
+    Example:
+    @(
+        @{RoleDefinitionName="Contributor"; Scope="/subscriptions/{id}"},
+        @{RoleDefinitionName="Key Vault Secrets Officer"; Scope="/subscriptions/{id}/resourceGroups/{rg}/providers/Microsoft.KeyVault/vaults/{name}"}
+    )
 
 .PARAMETER AzureDevOpsOrganization
     Azure DevOps organization name (e.g., "myorg" from dev.azure.com/myorg)
@@ -84,6 +97,18 @@
         -SkipServiceConnection
 
 .EXAMPLE
+    # Create service principal with multiple role assignments
+    .\New-WorkloadIdentity.ps1 `
+        -ServicePrincipalName "sp-keyrotation" `
+        -SubscriptionId "11111111-1111-1111-1111-111111111111" `
+        -RoleAssignments @(
+            @{RoleDefinitionName="Contributor"; Scope="/subscriptions/11111111-1111-1111-1111-111111111111"},
+            @{RoleDefinitionName="Key Vault Secrets Officer"; Scope="/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/my-rg/providers/Microsoft.KeyVault/vaults/my-vault"}
+        ) `
+        -AzureDevOpsOrganization "myorg" `
+        -AzureDevOpsProject "MyProject"
+
+.EXAMPLE
     # Create service principal with Graph API permissions
     .\New-WorkloadIdentity.ps1 `
         -ServicePrincipalName "sp-graph-app" `
@@ -126,6 +151,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string]$ManagementGroupId,
+
+    [Parameter(Mandatory = $false)]
+    [array]$RoleAssignments,
 
     [Parameter(Mandatory = $false)]
     [string]$AzureDevOpsOrganization,
@@ -195,21 +223,31 @@ if (-not $ServicePrincipalName) {
     Write-Host "✓ Generated service principal name: $ServicePrincipalName" -ForegroundColor Green
 }
 
-# Set scope based on parameters
-if ($ManagementGroupId) {
-    $Scope = "/providers/Microsoft.Management/managementGroups/$ManagementGroupId"
-    Write-Host "✓ Using management group scope: $ManagementGroupId" -ForegroundColor Green
-}
-elseif (-not $Scope) {
-    $Scope = "/subscriptions/$SubscriptionId"
+# Set scope based on parameters (unless using RoleAssignments)
+if (-not $RoleAssignments) {
+    if ($ManagementGroupId) {
+        $Scope = "/providers/Microsoft.Management/managementGroups/$ManagementGroupId"
+        Write-Host "✓ Using management group scope: $ManagementGroupId" -ForegroundColor Green
+    }
+    elseif (-not $Scope) {
+        $Scope = "/subscriptions/$SubscriptionId"
+    }
 }
 
 # Confirm operation
 if (-not $Force) {
     Write-Host "`n⚠️  This will:" -ForegroundColor Yellow
     Write-Host "   - Create/update service principal: $ServicePrincipalName" -ForegroundColor Gray
-    Write-Host "   - Assign role: $RoleDefinitionName" -ForegroundColor Gray
-    Write-Host "   - Scope: $Scope" -ForegroundColor Gray
+    if ($RoleAssignments) {
+        Write-Host "   - Assign roles:" -ForegroundColor Gray
+        foreach ($assignment in $RoleAssignments) {
+            Write-Host "     * $($assignment.RoleDefinitionName) at $($assignment.Scope)" -ForegroundColor Gray
+        }
+    }
+    else {
+        Write-Host "   - Assign role: $RoleDefinitionName" -ForegroundColor Gray
+        Write-Host "   - Scope: $Scope" -ForegroundColor Gray
+    }
     if (-not $SkipServiceConnection) {
         Write-Host "   - Create Azure DevOps service connection in: $AzureDevOpsOrganization/$AzureDevOpsProject" -ForegroundColor Gray
     }
@@ -246,23 +284,46 @@ catch {
     exit 1
 }
 
-# Assign Azure RBAC role
-Write-Host "`n[4/7] Assigning Azure RBAC role..." -ForegroundColor Yellow
+# Assign Azure RBAC role(s)
+Write-Host "`n[4/7] Assigning Azure RBAC role(s)..." -ForegroundColor Yellow
 try {
-    $existingRole = Get-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $RoleDefinitionName -Scope $Scope -ErrorAction SilentlyContinue
-    if ($existingRole) {
-        Write-Host "✓ Role assignment already exists" -ForegroundColor Green
+    if ($RoleAssignments) {
+        # Multiple role assignments
+        $assignmentCount = 0
+        foreach ($assignment in $RoleAssignments) {
+            $assignmentRole = $assignment.RoleDefinitionName
+            $assignmentScope = $assignment.Scope
+            
+            $existingRole = Get-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $assignmentRole -Scope $assignmentScope -ErrorAction SilentlyContinue
+            if ($existingRole) {
+                Write-Host "  ✓ Role already assigned: $assignmentRole" -ForegroundColor Gray
+                Write-Host "    Scope: $assignmentScope" -ForegroundColor Gray
+            }
+            else {
+                New-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $assignmentRole -Scope $assignmentScope | Out-Null
+                Write-Host "  ✓ Assigned role: $assignmentRole" -ForegroundColor Green
+                Write-Host "    Scope: $assignmentScope" -ForegroundColor Gray
+                $assignmentCount++
+            }
+        }
+        if ($assignmentCount -gt 0) {
+            Write-Host "✓ Assigned $assignmentCount new role(s)" -ForegroundColor Green
+        }
+        else {
+            Write-Host "✓ All role assignments already exist" -ForegroundColor Green
+        }
     }
     else {
-        if ($ManagementGroupId) {
-            # For management groups, use the -ManagementGroupName parameter
-            New-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $RoleDefinitionName -Scope $Scope | Out-Null
+        # Single role assignment (backward compatibility)
+        $existingRole = Get-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $RoleDefinitionName -Scope $Scope -ErrorAction SilentlyContinue
+        if ($existingRole) {
+            Write-Host "✓ Role assignment already exists" -ForegroundColor Green
         }
         else {
             New-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $RoleDefinitionName -Scope $Scope | Out-Null
+            Write-Host "✓ Assigned role: $RoleDefinitionName" -ForegroundColor Green
+            Write-Host "  Scope: $Scope" -ForegroundColor Gray
         }
-        Write-Host "✓ Assigned role: $RoleDefinitionName" -ForegroundColor Green
-        Write-Host "  Scope: $Scope" -ForegroundColor Gray
     }
 }
 catch {
@@ -559,10 +620,20 @@ Write-Host "  Application ID: $($sp.AppId)" -ForegroundColor White
 Write-Host "  Object ID: $($sp.Id)" -ForegroundColor White
 Write-Host "  Tenant ID: $($context.Tenant.Id)" -ForegroundColor White
 Write-Host ""
-Write-Host "Role Assignment:" -ForegroundColor Cyan
-Write-Host "  Role: $RoleDefinitionName" -ForegroundColor White
-Write-Host "  Scope: $Scope" -ForegroundColor White
-Write-Host ""
+if ($RoleAssignments) {
+    Write-Host "Role Assignments:" -ForegroundColor Cyan
+    foreach ($assignment in $RoleAssignments) {
+        Write-Host "  Role: $($assignment.RoleDefinitionName)" -ForegroundColor White
+        Write-Host "  Scope: $($assignment.Scope)" -ForegroundColor White
+        Write-Host "" -ForegroundColor White
+    }
+}
+else {
+    Write-Host "Role Assignment:" -ForegroundColor Cyan
+    Write-Host "  Role: $RoleDefinitionName" -ForegroundColor White
+    Write-Host "  Scope: $Scope" -ForegroundColor White
+    Write-Host ""
+}
 
 if (-not $SkipServiceConnection -and $serviceConnectionId) {
     Write-Host "Azure DevOps Service Connection:" -ForegroundColor Cyan
