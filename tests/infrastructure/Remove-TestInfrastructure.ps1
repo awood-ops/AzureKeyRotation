@@ -69,20 +69,30 @@ catch {
     exit 1
 }
 
-# Delete Service Principal
-Write-Host "Deleting Service Principal: $ServicePrincipalName..." -ForegroundColor Cyan
+# Delete Service Principal and Application Registration
+Write-Host "Deleting Service Principal and Application: $ServicePrincipalName..." -ForegroundColor Cyan
 try {
-    $sp = Get-AzADServicePrincipal -DisplayName $ServicePrincipalName -ErrorAction SilentlyContinue
-    if ($sp) {
-        Remove-AzADServicePrincipal -ObjectId $sp.Id -Force
-        Write-Host "✓ Service Principal deleted." -ForegroundColor Green
+    # Get the application first (which will give us both app and SP info)
+    $app = Get-AzADApplication -DisplayName $ServicePrincipalName -ErrorAction SilentlyContinue
+    
+    if ($app) {
+        # Delete the application (this will also delete the associated service principal)
+        Remove-AzADApplication -ObjectId $app.Id
+        Write-Host "✓ Application and Service Principal deleted." -ForegroundColor Green
     }
     else {
-        Write-Host "  Service Principal not found (may already be deleted)." -ForegroundColor Yellow
+        Write-Host "  Application not found (may already be deleted)." -ForegroundColor Yellow
+        
+        # Check if service principal exists independently
+        $sp = Get-AzADServicePrincipal -DisplayName $ServicePrincipalName -ErrorAction SilentlyContinue
+        if ($sp) {
+            Remove-AzADServicePrincipal -ObjectId $sp.Id
+            Write-Host "✓ Service Principal deleted." -ForegroundColor Green
+        }
     }
 }
 catch {
-    Write-Host "Error deleting Service Principal: $_" -ForegroundColor Red
+    Write-Host "Error deleting Application/Service Principal: $_" -ForegroundColor Red
 }
 Write-Host ""
 
